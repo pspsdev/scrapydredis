@@ -2,8 +2,6 @@ from zope.interface import implementer
 import redis
 import json
 from scrapyd.interfaces import ISpiderQueue
-from scrapyd.sqlite import JsonSqlitePriorityQueue
-from scrapyd.utils import sqlite_connection_string
 
 
 @implementer(ISpiderQueue)
