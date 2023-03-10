@@ -30,7 +30,10 @@ class JsonSqliteDict(MutableMapping):
         self.queue = "scrapyd-redis.queue.{}.{}".format(database, table)
 
     def __getitem__(self, key):
-        self.decode(self.conn.get(key))
+        try:
+            self.decode(self.conn.get(key))
+        except:
+            return None
 
     def __setitem__(self, key, value):
         self.conn.set(key, self.encode(value))
