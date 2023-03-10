@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from datetime import datetime
+import redis
 
 try:
     from collections.abc import MutableMapping
@@ -12,68 +13,64 @@ class JsonSqliteDict(MutableMapping):
     """SQLite-backed dictionary"""
 
     def __init__(self, database=None, table="dict"):
-        self.database = database or ':memory:'
-        self.table = table
-        # about check_same_thread: http://twistedmatrix.com/trac/ticket/4040
-        self.conn = sqlite3.connect(self.database, check_same_thread=False)
-        q = "create table if not exists %s (key blob primary key, value blob)" \
-            % table
-        self.conn.execute(q)
+        database_host = "redisdocker"
+        database_port = 6379
+        # database_user = self.get_optional_config(config, 'redis_user')
+        # database_pwd = self.get_optional_config(config, 'redis_pass')
+
+        self.conn = redis.StrictRedis(
+            host=database_host,
+            port=int(database_port),
+            charset="utf-8",
+            decode_responses=True,
+            # db=int(database_name),
+            # password=database_pwd
+        )
+
+        self.queue = "scrapyd-redis.queue.{}.{}".format(database, table)
 
     def __getitem__(self, key):
-        key = self.encode(key)
-        q = "select value from %s where key=?" % self.table
-        value = self.conn.execute(q, (key,)).fetchone()
-        if value:
-            return self.decode(value[0])
-        raise KeyError(key)
+        self.decode(self.conn.get(key))
 
     def __setitem__(self, key, value):
-        key, value = self.encode(key), self.encode(value)
-        q = "insert or replace into %s (key, value) values (?,?)" % self.table
-        self.conn.execute(q, (key, value))
-        self.conn.commit()
+        self.conn.set(key, self.encode(value))
 
     def __delitem__(self, key):
-        key = self.encode(key)
-        q = "delete from %s where key=?" % self.table
-        self.conn.execute(q, (key,))
-        self.conn.commit()
+        self.conn.delete(key)
 
     def __len__(self):
-        q = "select count(*) from %s" % self.table
-        return self.conn.execute(q).fetchone()[0]
+        return len(self.conn.keys("*"))
 
     def __iter__(self):
         for k in self.iterkeys():
             yield k
 
     def iterkeys(self):
-        q = "select key from %s" % self.table
-        return (self.decode(x[0]) for x in self.conn.execute(q))
+        for k in self.conn.keys("*"):
+            yield k
 
     def keys(self):
-        return list(self.iterkeys())
+        return list(self.conn.keys("*"))
 
     def itervalues(self):
-        q = "select value from %s" % self.table
-        return (self.decode(x[0]) for x in self.conn.execute(q))
+        for k in self.conn.keys("*"):
+            yield self.decode(self.conn.get(k))
 
     def values(self):
         return list(self.itervalues())
 
     def iteritems(self):
-        q = "select key, value from %s" % self.table
-        return ((self.decode(x[0]), self.decode(x[1])) for x in self.conn.execute(q))
+        for k in self.conn.keys("*"):
+            yield k, self.decode(self.conn.get(k))
 
     def items(self):
         return list(self.iteritems())
 
     def encode(self, obj):
-        return sqlite3.Binary(json.dumps(obj).encode('ascii'))
+        return json.dumps(obj)
 
-    def decode(self, obj):
-        return json.loads(bytes(obj).decode('ascii'))
+    def decode(self, text):
+        return json.loads(text)
 
 
 class JsonSqlitePriorityQueue(object):
@@ -82,12 +79,14 @@ class JsonSqlitePriorityQueue(object):
     """
 
     def __init__(self, database=None, table="queue"):
-        self.database = database or ':memory:'
+        self.database = database or ":memory:"
         self.table = table
         # about check_same_thread: http://twistedmatrix.com/trac/ticket/4040
         self.conn = sqlite3.connect(self.database, check_same_thread=False)
-        q = "create table if not exists %s (id integer primary key, " \
+        q = (
+            "create table if not exists %s (id integer primary key, "
             "priority real key, message blob)" % table
+        )
         self.conn.execute(q)
 
     def put(self, message, priority=0.0):
@@ -97,8 +96,7 @@ class JsonSqlitePriorityQueue(object):
         self.conn.commit()
 
     def pop(self):
-        q = "select id, message from %s order by priority desc limit 1" \
-            % self.table
+        q = "select id, message from %s order by priority desc limit 1" % self.table
         idmsg = self.conn.execute(q).fetchone()
         if idmsg is None:
             return
@@ -134,32 +132,37 @@ class JsonSqlitePriorityQueue(object):
         return self.conn.execute(q).fetchone()[0]
 
     def __iter__(self):
-        q = "select message, priority from %s order by priority desc" % \
-            self.table
+        q = "select message, priority from %s order by priority desc" % self.table
         return ((self.decode(x), y) for x, y in self.conn.execute(q))
 
     def encode(self, obj):
-        return sqlite3.Binary(json.dumps(obj).encode('ascii'))
+        return sqlite3.Binary(json.dumps(obj).encode("ascii"))
 
     def decode(self, text):
-        return json.loads(bytes(text).decode('ascii'))
+        return json.loads(bytes(text).decode("ascii"))
 
 
 class SqliteFinishedJobs(object):
-    """SQLite finished jobs. """
+    """SQLite finished jobs."""
 
     def __init__(self, database=None, table="finished_jobs"):
-        self.database = database or ':memory:'
+        self.database = database or ":memory:"
         self.table = table
         # about check_same_thread: http://twistedmatrix.com/trac/ticket/4040
         self.conn = sqlite3.connect(self.database, check_same_thread=False)
-        q = "create table if not exists %s (id integer primary key, " \
-            "project text, spider text, job text, start_time datetime, end_time datetime)" % table
+        q = (
+            "create table if not exists %s (id integer primary key, "
+            "project text, spider text, job text, start_time datetime, end_time datetime)"
+            % table
+        )
         self.conn.execute(q)
 
     def add(self, job):
         args = (job.project, job.spider, job.job, job.start_time, job.end_time)
-        q = "insert into %s (project, spider, job, start_time, end_time) values (?,?,?,?,?)" % self.table
+        q = (
+            "insert into %s (project, spider, job, start_time, end_time) values (?,?,?,?,?)"
+            % self.table
+        )
         self.conn.execute(q, args)
         self.conn.commit()
 
@@ -169,8 +172,10 @@ class SqliteFinishedJobs(object):
             limit = len(self) - finished_to_keep
             if limit <= 0:
                 return  # nothing to delete
-            w = "where id <= (select max(id) from " \
+            w = (
+                "where id <= (select max(id) from "
                 "(select id from %s order by end_time limit %d))" % (self.table, limit)
+            )
         q = "delete from %s %s" % (self.table, w)
         self.conn.execute(q)
         self.conn.commit()
@@ -180,8 +185,17 @@ class SqliteFinishedJobs(object):
         return self.conn.execute(q).fetchone()[0]
 
     def __iter__(self):
-        q = "select project, spider, job, start_time, end_time from %s order by end_time desc" % \
-            self.table
-        return ((j[0], j[1], j[2],
+        q = (
+            "select project, spider, job, start_time, end_time from %s order by end_time desc"
+            % self.table
+        )
+        return (
+            (
+                j[0],
+                j[1],
+                j[2],
                 datetime.strptime(j[3], "%Y-%m-%d %H:%M:%S.%f"),
-                datetime.strptime(j[4], "%Y-%m-%d %H:%M:%S.%f")) for j in self.conn.execute(q))
+                datetime.strptime(j[4], "%Y-%m-%d %H:%M:%S.%f"),
+            )
+            for j in self.conn.execute(q)
+        )
